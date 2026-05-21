@@ -7,7 +7,7 @@ static CFFGLPluginInfo PluginInfo(
     2, 1,
     1, 0,
     FF_EFFECT,
-    "Insta360 X5 Side-by-Side full 360 viewer",
+    "Insta360 X5 Over/Under full 360 viewer",
     "FleetView"
 );
 
@@ -28,7 +28,8 @@ static const char* kFrag = R"glsl(
 #define PI 3.14159265358979323846
 
 uniform sampler2D InputTexture;
-uniform float AspectRatio;  // full frame W/H
+uniform float AspectRatio;   // full frame W/H
+uniform float HalfAspect;   // (W) / (H/2)  — aspect ratio of each half
 uniform int   Swap;
 uniform float Pan;
 uniform float Tilt;
@@ -56,19 +57,19 @@ void main() {
     float cp = cos(Pan * PI / 180.0), sp = sin(Pan * PI / 180.0);
     ray = vec3(ray.x * cp + ray.z * sp, ray.y, -ray.x * sp + ray.z * cp);
 
-    // Front lens (left half) when ray.z >= 0, rear lens (right half) when ray.z < 0
+    // Front lens = top half (yOffset 0.5), rear lens = bottom half (yOffset 0.0)
     bool useFront = (Swap == 0) ? (ray.z >= 0.0) : (ray.z < 0.0);
 
     vec3 fisheyeRay;
-    float xCenter;
+    float yOffset;
 
     if (useFront) {
         fisheyeRay = ray;
-        xCenter = 0.25;  // left half of SBS frame
+        yOffset = 0.5;
     } else {
         // Mirror X to correct the rear lens horizontal flip
         fisheyeRay = vec3(-ray.x, ray.y, -ray.z);
-        xCenter = 0.75;  // right half of SBS frame
+        yOffset = 0.0;
     }
 
     float theta    = acos(clamp(fisheyeRay.z, -1.0, 1.0));
@@ -78,15 +79,18 @@ void main() {
 
     if (r > 1.0) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
-    // Fisheye circle radius in UV coords — circle is constrained by the
-    // smaller dimension of each SBS half (halfWidth vs height)
-    float circleR_U = min(0.5, 1.0 / AspectRatio) * 0.5;
-    float circleR_V = circleR_U * AspectRatio;
+    // Each half is wide (HalfAspect >> 1), so the fisheye circle is
+    // constrained by height.  radiusX corrects for non-square halves.
+    float radiusX = 0.5 / HalfAspect;
+    float radiusY = 0.5;
 
     vec2 sampleUV = vec2(
-        xCenter + r * cos(phi) * circleR_U,
-        0.5     + r * sin(phi) * circleR_V
+        0.5 + r * cos(phi) * radiusX,
+        0.5 + r * sin(phi) * radiusY
     );
+
+    // Map into the correct vertical half of the Over/Under frame
+    sampleUV.y = sampleUV.y * 0.5 + yOffset;
 
     fragColor = texture(InputTexture, sampleUV);
 }
@@ -124,8 +128,9 @@ FFResult X5FisheyeViewer::ProcessOpenGL(ProcessOpenGLStruct* pGL) {
     FFGLTextureStruct& tex = *(pGL->inputTextures[0]);
     if (!tex.Handle) return FF_FAIL;
 
-    float maxU = tex.HardwareWidth  ? (float)tex.Width  / tex.HardwareWidth  : 1.f;
-    float maxV = tex.HardwareHeight ? (float)tex.Height / tex.HardwareHeight : 1.f;
+    float maxU       = tex.HardwareWidth  ? (float)tex.Width  / tex.HardwareWidth  : 1.f;
+    float maxV       = tex.HardwareHeight ? (float)tex.Height / tex.HardwareHeight : 1.f;
+    float halfAspect = (tex.Height > 0)   ? (float)tex.Width  / (tex.Height * 0.5f) : 1.f;
 
     ffglex::ScopedShaderBinding     shaderBinding(m_shader.GetGLID());
     ffglex::ScopedSamplerActivation samplerActivation(0);
@@ -134,6 +139,7 @@ FFResult X5FisheyeViewer::ProcessOpenGL(ProcessOpenGLStruct* pGL) {
     m_shader.Set("InputTexture", 0);
     m_shader.Set("MaxUV",        maxU, maxV);
     m_shader.Set("AspectRatio",  m_aspect);
+    m_shader.Set("HalfAspect",   halfAspect);
     m_shader.Set("Swap",         m_swap);
     m_shader.Set("Pan",          m_pan);
     m_shader.Set("Tilt",         m_tilt);
