@@ -28,8 +28,8 @@ static const char* kFrag = R"glsl(
 #define PI 3.14159265358979323846
 
 uniform sampler2D InputTexture;
-uniform float AspectRatio;   // full frame W/H
-uniform float HalfAspect;   // (W) / (H/2)  — aspect ratio of each half
+uniform float AspectRatio;
+uniform float HalfAspect;
 uniform int   Swap;
 uniform float Pan;
 uniform float Tilt;
@@ -39,6 +39,17 @@ uniform float LensFOV;
 
 in  vec2 vUV;
 out vec4 fragColor;
+
+vec2 fisheyeUV(vec3 ray, float maxTheta, float radiusX, float radiusY, float yOffset) {
+    float theta = acos(clamp(ray.z, -1.0, 1.0));
+    float phi   = atan(ray.y, ray.x);
+    float r     = theta / maxTheta;
+    vec2 uv = vec2(
+        0.5 + r * cos(phi) * radiusX,
+        (0.5 + r * sin(phi) * radiusY) * 0.5 + yOffset
+    );
+    return uv;
+}
 
 void main() {
     vec2 ndc = (vUV * 2.0 - 1.0) * vec2(AspectRatio, 1.0);
@@ -57,42 +68,45 @@ void main() {
     float cp = cos(Pan * PI / 180.0), sp = sin(Pan * PI / 180.0);
     ray = vec3(ray.x * cp + ray.z * sp, ray.y, -ray.x * sp + ray.z * cp);
 
-    // Front lens = top half (yOffset 0.5), rear lens = bottom half (yOffset 0.0)
-    bool useFront = (Swap == 0) ? (ray.z >= 0.0) : (ray.z < 0.0);
-
-    vec3 fisheyeRay;
-    float yOffset;
-
-    if (useFront) {
-        fisheyeRay = ray;
-        yOffset = 0.5;
-    } else {
-        // Mirror X to correct the rear lens horizontal flip
-        fisheyeRay = vec3(-ray.x, ray.y, -ray.z);
-        yOffset = 0.0;
-    }
-
-    float theta    = acos(clamp(fisheyeRay.z, -1.0, 1.0));
-    float phi      = atan(fisheyeRay.y, fisheyeRay.x);
     float maxTheta = LensFOV * 0.5 * PI / 180.0;
-    float r        = theta / maxTheta;
-
-    if (r > 1.0) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
-
-    // Each half is wide (HalfAspect >> 1), so the fisheye circle is
-    // constrained by height.  radiusX corrects for non-square halves.
+    // Each Over/Under half is wide (HalfAspect >> 1), circle constrained by height
     float radiusX = 0.5 / HalfAspect;
     float radiusY = 0.5;
 
-    vec2 sampleUV = vec2(
-        0.5 + r * cos(phi) * radiusX,
-        0.5 + r * sin(phi) * radiusY
-    );
+    float yFront = (Swap == 0) ? 0.5 : 0.0;  // top or bottom half
+    float yRear  = (Swap == 0) ? 0.0 : 0.5;
 
-    // Map into the correct vertical half of the Over/Under frame
-    sampleUV.y = sampleUV.y * 0.5 + yOffset;
+    // Front hemisphere ray (toward +Z)
+    float r_f = acos(clamp(ray.z, -1.0, 1.0)) / maxTheta;
 
-    fragColor = texture(InputTexture, sampleUV);
+    // Rear hemisphere ray (mirror X to correct physical lens orientation)
+    vec3 rearRay = vec3(-ray.x, ray.y, -ray.z);
+    float r_r = acos(clamp(rearRay.z, -1.0, 1.0)) / maxTheta;
+
+    // Sample front and rear — initialize to black
+    vec4 frontColor = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 rearColor  = vec4(0.0, 0.0, 0.0, 1.0);
+
+    if (r_f <= 1.0)
+        frontColor = texture(InputTexture, fisheyeUV(ray,     maxTheta, radiusX, radiusY, yFront));
+    if (r_r <= 1.0)
+        rearColor  = texture(InputTexture, fisheyeUV(rearRay, maxTheta, radiusX, radiusY, yRear));
+
+    // Soft blend across the seam — blend zone ≈ ±6° around the 90° boundary
+    // smoothstep: t=1 → front (ray.z > 0), t=0 → rear (ray.z < 0)
+    float t = smoothstep(-0.1, 0.1, ray.z);
+
+    bool frontValid = (r_f <= 1.0);
+    bool rearValid  = (r_r <= 1.0);
+
+    if (frontValid && rearValid)
+        fragColor = mix(rearColor, frontColor, t);
+    else if (frontValid)
+        fragColor = frontColor;
+    else if (rearValid)
+        fragColor = rearColor;
+    else
+        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
 }
 )glsl";
 
