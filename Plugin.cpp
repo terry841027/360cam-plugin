@@ -40,16 +40,21 @@ uniform float LensFOV;
 in  vec2 vUV;
 out vec4 fragColor;
 
-// Sample one fisheye half.  Returns alpha=0 when outside the circle.
+// Sample one fisheye half.
+// Weight = 1.0 for r < 0.85 (sharp centre zone), smoothly fades to 0 at r = 1.0.
+// This avoids sampling from the dark/distorted fisheye edge and concentrates
+// blending only in the narrow seam zone, reducing ghosting in the overlap region.
 vec4 sampleLens(vec3 ray, float maxTheta, float radiusX, float yOffset) {
     float r   = acos(clamp(ray.z, -1.0, 1.0)) / maxTheta;
-    if (r > 1.0) return vec4(0.0);
+    if (r >= 1.0) return vec4(0.0);
     float phi = atan(ray.y, ray.x);
     vec2  uv  = vec2(
         0.5 + r * cos(phi) * radiusX,
         (0.5 + r * sin(phi) * 0.5) * 0.5 + yOffset
     );
-    return vec4(texture(InputTexture, uv).rgb, 1.0 - r);  // alpha = coverage weight
+    // Full confidence in lens centre; smooth S-curve falloff only near seam edge
+    float w = 1.0 - smoothstep(0.85, 1.0, r);
+    return vec4(texture(InputTexture, uv).rgb, w);
 }
 
 void main() {
@@ -81,8 +86,6 @@ void main() {
     vec4 front = sampleLens(ray,     maxTheta, radiusX, yFront);
     vec4 rear  = sampleLens(rearRay, maxTheta, radiusX, yRear);
 
-    // Weight each lens by (1-r): lens centre = weight 1, lens edge = weight 0.
-    // Where lenses overlap, this produces a smooth cross-fade instead of a hard seam.
     float wF = front.a;
     float wR = rear.a;
     float wT = wF + wR;
