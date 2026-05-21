@@ -40,15 +40,16 @@ uniform float LensFOV;
 in  vec2 vUV;
 out vec4 fragColor;
 
-vec2 fisheyeUV(vec3 ray, float maxTheta, float radiusX, float radiusY, float yOffset) {
-    float theta = acos(clamp(ray.z, -1.0, 1.0));
-    float phi   = atan(ray.y, ray.x);
-    float r     = theta / maxTheta;
-    vec2 uv = vec2(
+// Sample one fisheye half.  Returns alpha=0 when outside the circle.
+vec4 sampleLens(vec3 ray, float maxTheta, float radiusX, float yOffset) {
+    float r   = acos(clamp(ray.z, -1.0, 1.0)) / maxTheta;
+    if (r > 1.0) return vec4(0.0);
+    float phi = atan(ray.y, ray.x);
+    vec2  uv  = vec2(
         0.5 + r * cos(phi) * radiusX,
-        (0.5 + r * sin(phi) * radiusY) * 0.5 + yOffset
+        (0.5 + r * sin(phi) * 0.5) * 0.5 + yOffset
     );
-    return uv;
+    return vec4(texture(InputTexture, uv).rgb, 1.0 - r);  // alpha = coverage weight
 }
 
 void main() {
@@ -69,50 +70,33 @@ void main() {
     ray = vec3(ray.x * cp + ray.z * sp, ray.y, -ray.x * sp + ray.z * cp);
 
     float maxTheta = LensFOV * 0.5 * PI / 180.0;
-    // Each Over/Under half is wide (HalfAspect >> 1), circle constrained by height
-    float radiusX = 0.5 / HalfAspect;
-    float radiusY = 0.5;
+    float radiusX  = 0.5 / HalfAspect;
 
-    float yFront = (Swap == 0) ? 0.5 : 0.0;  // top or bottom half
+    float yFront = (Swap == 0) ? 0.5 : 0.0;
     float yRear  = (Swap == 0) ? 0.0 : 0.5;
 
-    // Front hemisphere ray (toward +Z)
-    float r_f = acos(clamp(ray.z, -1.0, 1.0)) / maxTheta;
-
-    // Rear hemisphere ray (mirror X to correct physical lens orientation)
+    // Front ray (toward +Z) and rear ray (mirror X for correct orientation)
     vec3 rearRay = vec3(-ray.x, ray.y, -ray.z);
-    float r_r = acos(clamp(rearRay.z, -1.0, 1.0)) / maxTheta;
 
-    // Sample front and rear — initialize to black
-    vec4 frontColor = vec4(0.0, 0.0, 0.0, 1.0);
-    vec4 rearColor  = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 front = sampleLens(ray,     maxTheta, radiusX, yFront);
+    vec4 rear  = sampleLens(rearRay, maxTheta, radiusX, yRear);
 
-    if (r_f <= 1.0)
-        frontColor = texture(InputTexture, fisheyeUV(ray,     maxTheta, radiusX, radiusY, yFront));
-    if (r_r <= 1.0)
-        rearColor  = texture(InputTexture, fisheyeUV(rearRay, maxTheta, radiusX, radiusY, yRear));
+    // Weight each lens by (1-r): lens centre = weight 1, lens edge = weight 0.
+    // Where lenses overlap, this produces a smooth cross-fade instead of a hard seam.
+    float wF = front.a;
+    float wR = rear.a;
+    float wT = wF + wR;
 
-    // Soft blend across the seam — blend zone ≈ ±6° around the 90° boundary
-    // smoothstep: t=1 → front (ray.z > 0), t=0 → rear (ray.z < 0)
-    float t = smoothstep(-0.1, 0.1, ray.z);
-
-    bool frontValid = (r_f <= 1.0);
-    bool rearValid  = (r_r <= 1.0);
-
-    if (frontValid && rearValid)
-        fragColor = mix(rearColor, frontColor, t);
-    else if (frontValid)
-        fragColor = frontColor;
-    else if (rearValid)
-        fragColor = rearColor;
-    else
+    if (wT < 0.001)
         fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    else
+        fragColor = vec4((front.rgb * wF + rear.rgb * wR) / wT, 1.0);
 }
 )glsl";
 
 X5FisheyeViewer::X5FisheyeViewer()
     : m_swap(0), m_pan(0.f), m_tilt(0.f), m_roll(0.f),
-      m_fov(90.f), m_lensFOV(180.f), m_aspect(1.f)
+      m_fov(90.f), m_lensFOV(190.f), m_aspect(1.f)
 {
     SetMinInputs(1);
     SetMaxInputs(1);
@@ -121,7 +105,8 @@ X5FisheyeViewer::X5FisheyeViewer()
     SetParamInfo(PARAM_TILT,    "Pitch",        FF_TYPE_STANDARD, 0.5f);
     SetParamInfo(PARAM_ROLL,    "Roll",         FF_TYPE_STANDARD, 0.5f);
     SetParamInfo(PARAM_FOV,     "fov Out",      FF_TYPE_STANDARD, 0.5714f);
-    SetParamInfo(PARAM_LENSFOV, "fov In",       FF_TYPE_STANDARD, 0.5f);
+    // Default LensFOV = 190 deg → slider = (190-150)/60 = 0.667
+    SetParamInfo(PARAM_LENSFOV, "fov In",       FF_TYPE_STANDARD, 0.6667f);
 }
 
 FFResult X5FisheyeViewer::InitGL(const FFGLViewportStruct* vp) {
